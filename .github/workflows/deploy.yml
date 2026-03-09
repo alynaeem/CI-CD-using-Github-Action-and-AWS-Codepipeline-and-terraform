@@ -83,25 +83,27 @@ jobs:
           echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
 
       # ── 7. Generate imagedefinitions.json ─────────────────────────────────
-      # This file is the contract between CI and the CodePipeline CD stage.
-      # Format required by ECS standard deploy action.
+      # Container name MUST match the 'name' field in the ECS task definition.
+      # Verify against: terraform/ecs.tf → container_definitions → name
       - name: Generate imagedefinitions.json
         env:
           IMAGE_URI: ${{ steps.build-image.outputs.image }}
         run: |
           echo "[{\"name\":\"${ECS_CONTAINER}\",\"imageUri\":\"${IMAGE_URI}\"}]" \
             | jq . > imagedefinitions.json
-          echo "Generated imagedefinitions.json:"
+          echo "✅ Generated imagedefinitions.json:"
           cat imagedefinitions.json
 
-      # ── 8. Upload to S3 — triggers CodePipeline ───────────────────────────
-      # CodePipeline's S3 source watches this key via EventBridge.
-      # Uploading here effectively triggers the CD pipeline on every ECR push.
-      - name: Upload imagedefinitions.json to S3 (triggers CodePipeline)
+      # ── 8. Zip artifact and upload to S3 — triggers CodePipeline ──────────
+      # CodePipeline's S3 source action requires a ZIP archive — a bare JSON
+      # file is not recognized as a valid pipeline artifact input.
+      - name: Package and upload artifact.zip to S3
         run: |
-          aws s3 cp imagedefinitions.json \
-            s3://${{ env.ARTIFACT_BUCKET }}/imagedefinitions.json \
+          zip artifact.zip imagedefinitions.json
+          aws s3 cp artifact.zip \
+            s3://${{ env.ARTIFACT_BUCKET }}/artifact.zip \
             --region ${{ env.AWS_REGION }}
+          echo "✅ artifact.zip uploaded → CodePipeline triggered"
 
       # ── 9. Job summary ────────────────────────────────────────────────────
       - name: CI Summary

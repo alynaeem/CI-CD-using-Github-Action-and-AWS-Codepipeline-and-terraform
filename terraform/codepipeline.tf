@@ -175,8 +175,11 @@ resource "aws_codepipeline" "app" {
 
       configuration = {
         S3Bucket             = aws_s3_bucket.pipeline_artifacts.bucket
-        S3ObjectKey          = "imagedefinitions.json"
-        PollForSourceChanges = "false" # Use EventBridge instead of polling
+        # GHA uploads artifact.zip (contains imagedefinitions.json).
+        # CodePipeline automatically unzips the artifact before passing it
+        # to downstream stages — the ECS action receives imagedefinitions.json.
+        S3ObjectKey          = "artifact.zip"
+        PollForSourceChanges = "false" # Triggered by EventBridge — no polling
       }
     }
   }
@@ -216,7 +219,7 @@ resource "aws_cloudwatch_event_rule" "pipeline_trigger" {
     detail-type = ["Object Created"],
     detail = {
       bucket = { name = [aws_s3_bucket.pipeline_artifacts.bucket] },
-      object = { key = ["imagedefinitions.json"] }
+      object = { key = ["artifact.zip"] }   # Matches the zip GHA uploads
     }
   })
 }
