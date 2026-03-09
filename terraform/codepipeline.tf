@@ -171,7 +171,7 @@ resource "aws_codepipeline" "app" {
       owner            = "AWS"
       provider         = "S3"
       version          = "1"
-      output_artifacts = ["SourceOutput"]
+      output_artifacts = ["SourceArtifact"]
 
       configuration = {
         S3Bucket             = aws_s3_bucket.pipeline_artifacts.bucket
@@ -196,7 +196,7 @@ resource "aws_codepipeline" "app" {
       owner           = "AWS"
       provider        = "ECS"
       version         = "1"
-      input_artifacts = ["SourceOutput"]
+      input_artifacts = ["SourceArtifact"]
 
       configuration = {
         ClusterName = data.aws_ecs_cluster.pipeline_app.cluster_name

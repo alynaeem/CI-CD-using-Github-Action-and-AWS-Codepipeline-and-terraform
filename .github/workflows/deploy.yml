@@ -99,7 +99,11 @@ jobs:
       # file is not recognized as a valid pipeline artifact input.
       - name: Package and upload artifact.zip to S3
         run: |
-          zip artifact.zip imagedefinitions.json
+          # -j = "junk paths": strips directory names, puts file at ZIP root.
+          # CodePipeline ECS action looks for imagedefinitions.json at root only.
+          zip -j artifact.zip imagedefinitions.json
+          echo "ZIP contents (must show imagedefinitions.json at root):"
+          unzip -l artifact.zip
           aws s3 cp artifact.zip \
             s3://${{ env.ARTIFACT_BUCKET }}/artifact.zip \
             --region ${{ env.AWS_REGION }}
