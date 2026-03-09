@@ -1,0 +1,114 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .github/workflows/deploy.yml — Hybrid CI/CD Pipeline
+#
+# Phase 1 (CI): Maven build → Docker build → ECR push → imagedefinitions.json → S3
+# Phase 2 (CD): AWS CodePipeline picks up imagedefinitions.json from S3 → ECS deploy
+#
+# Required GitHub Secret (Settings → Secrets → Actions):
+#   AWS_ACCOUNT_ID  — 12-digit AWS account ID (no static access keys needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI — Build, Push & Hand Off to CodePipeline
+
+on:
+  push:
+    branches: [main]
+
+# Cancel in-progress runs for the same branch to prevent race conditions
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION:      us-east-1
+  ECR_REPO:        product-microservice
+  ECS_CONTAINER:   product-microservice   # Must match container name in task definition
+  # Artifact bucket name is output from terraform/codepipeline.tf
+  ARTIFACT_BUCKET: product-microservice-pipeline-${{ secrets.AWS_ACCOUNT_ID }}
+
+jobs:
+  ci:
+    name: Build, Push & Handoff
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write   # Required to request an OIDC token from GitHub
+      contents: read    # Required for checkout
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ── 2. Java 17 + Maven dependency cache ──────────────────────────────
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+          cache: maven   # Caches ~/.m2 — speeds up subsequent workflow runs
+
+      # ── 3. Build & test ──────────────────────────────────────────────────
+      - name: Build with Maven
+        run: mvn --no-transfer-progress verify
+        # `verify` = compile + unit test + package. Pipeline fails fast on red tests.
+
+      # ── 4. Authenticate to AWS via OIDC (no static credentials) ──────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/product-microservice-github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GHA-CI-${{ github.run_id }}
+
+      # ── 5. Authenticate Docker to ECR ─────────────────────────────────────
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 6. Build & push image (linux/amd64 for Fargate) ──────────────────
+      - name: Build and push Docker image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker buildx create --use --name fargate-builder
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag $ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG \
+            --push \
+            .
+          echo "image=$ECR_REGISTRY/$ECR_REPO:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+
+      # ── 7. Generate imagedefinitions.json ─────────────────────────────────
+      # This file is the contract between CI and the CodePipeline CD stage.
+      # Format required by ECS standard deploy action.
+      - name: Generate imagedefinitions.json
+        env:
+          IMAGE_URI: ${{ steps.build-image.outputs.image }}
+        run: |
+          echo "[{\"name\":\"${ECS_CONTAINER}\",\"imageUri\":\"${IMAGE_URI}\"}]" \
+            | jq . > imagedefinitions.json
+          echo "Generated imagedefinitions.json:"
+          cat imagedefinitions.json
+
+      # ── 8. Upload to S3 — triggers CodePipeline ───────────────────────────
+      # CodePipeline's S3 source watches this key via EventBridge.
+      # Uploading here effectively triggers the CD pipeline on every ECR push.
+      - name: Upload imagedefinitions.json to S3 (triggers CodePipeline)
+        run: |
+          aws s3 cp imagedefinitions.json \
+            s3://${{ env.ARTIFACT_BUCKET }}/imagedefinitions.json \
+            --region ${{ env.AWS_REGION }}
+
+      # ── 9. Job summary ────────────────────────────────────────────────────
+      - name: CI Summary
+        run: |
+          echo "### ✅ CI Complete — CodePipeline deploying to ECS" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ steps.build-image.outputs.image }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit SHA | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| CodePipeline | [View in AWS Console](https://console.aws.amazon.com/codesuite/codepipeline/pipelines/product-microservice-pipeline/view) |" >> $GITHUB_STEP_SUMMARY
